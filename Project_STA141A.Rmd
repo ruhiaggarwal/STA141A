@@ -1,0 +1,442 @@
+---
+title: "project_sta141a"
+author: "Ruhi Aggarwal"
+date: "2024-03-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(caret) 
+library(ROCR)
+```
+
+
+```{r}
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./sessions/session',i,'.rds',sep=''))
+}
+
+summary(session[[5]])
+```
+
+```{r}
+get_trial_data <- function(session_id, trial_id){
+  spikes <- session[[session_id]]$spks[[trial_id]]
+  if (any(is.na(spikes))){
+    disp("value missing")
+  }
+  trial_tibble <- tibble("neuron_spike" = rowSums(spikes))  %>%  add_column("brain_area" = session[[session_id]]$brain_area ) %>% group_by(brain_area) %>% summarize( region_sum_spike = sum(neuron_spike), region_count = n(),region_mean_spike = mean(neuron_spike)) 
+  trial_tibble  = trial_tibble%>% add_column("trial_id" = trial_id) %>% add_column("contrast_left"= session[[session_id]]$contrast_left[trial_id]) %>% add_column("contrast_right"= session[[session_id]]$contrast_right[trial_id]) %>% add_column("feedback_type"= session[[session_id]]$feedback_type[trial_id]) %>% add_column("mouse" = session[[session_id]]$mouse_name)
+  trial_tibble
+}
+
+get_trial_data(1,2)
+
+```
+average number of spikes per neuron in aca
+
+```{r}
+
+total_neurons <- c()
+for (i in (1:18)) {
+  total_neurons= c(total_neurons, length(session[[i]]$brain_area))
+}
+
+avg_feedback <- c()
+for (i in (1:18)) {
+  avg_feedback= c(avg_feedback, mean(session[[i]]$feedback_type))
+}
+
+neuron_data = tibble(session = 1:18, total_neurons = total_neurons, avg_feedback = avg_feedback)
+plot(neuron_data$total_neurons, neuron_data$avg_feedback)
+neuron_model <- lm(avg_feedback ~ total_neurons, data = neuron_data)
+abline(neuron_model)
+summary(neuron_model)
+```
+
+```{r}
+brain_areas = c()
+for (i in 1:18) {
+  brain_areas = c(brain_areas, length(unique(session[[i]]$brain_area)) )
+}
+brain_areas
+
+
+brainarea_data = tibble(session = 1:18, unique_brain_areas_used = brain_areas, avg_feedback = avg_feedback)
+plot(brainarea_data$unique_brain_areas_used, brainarea_data$avg_feedback)
+brain_model <- lm(avg_feedback ~ unique_brain_areas_used, data = brainarea_data)
+abline(brain_model)
+summary(brain_model)
+```
+```{r}
+n.session=length(session)
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  n_brain_area = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+
+
+for(i in 1:n.session){
+  tmp = session[[i]];
+  meta[i,1]=tmp$mouse_name;
+  meta[i,2]=tmp$date_exp;
+  meta[i,3]=length(unique(tmp$brain_area));
+  meta[i,4]=dim(tmp$spks[[1]])[1];
+  meta[i,5]=length(tmp$feedback_type);
+  meta[i,6]=mean(tmp$feedback_type+1)/2;
+}
+
+meta
+
+```
+
+```{r}
+# trial_spks = session[[1]]$spks[[1]]
+# trial_areas = session[[1]]$brain_area
+# num_neuron = dim(trial_spks)[1]
+# sum_spks_per_neuron = apply(trial_spks, 1, sum)
+
+#tibble(neuron = 1:num_neuron, total_spikes = sum_spks_per_neuron, area = trial_areas) %>%
+  #group_by(area) %>% summarise(avg_spikes = mean(total_spikes))
+
+
+
+
+spike_by_area <- function(s, t) {
+  trial_spks = session[[s]]$spks[[t]]
+  trial_areas = session[[s]]$brain_area
+  num_neuron = dim(trial_spks)[1]
+  sum_spks_per_neuron = apply(trial_spks, 1, sum)
+  return (tibble(neuron = 1:num_neuron, total_spikes = sum_spks_per_neuron, area = trial_areas) %>%
+  group_by(area) %>% summarise(avg_spikes_per_neuron = mean(total_spikes)))
+}
+
+total_tib = tibble()
+for(s in 1:18){
+  sesh_tib = tibble()
+  current_sesh = session[[s]]
+  for (t in 1:length(current_sesh$feedback_type)) {
+    trial_tib = spike_by_area(s, t)
+    sesh_tib = bind_rows(sesh_tib, trial_tib)
+  }
+  total_tib = bind_rows(total_tib, sesh_tib)
+}
+
+total_tib = total_tib %>% group_by(area) %>% summarise(average_spikes_per_neuron = mean(avg_spikes_per_neuron))
+total_tib
+```
+
+```{r}
+total_tib %>% ggplot(aes(area, average_spikes_per_neuron)) + geom_bar(stat = 'identity')
+```
+It looks like there is one main brain area that has a very high spike rate, and 3 others that stand out as well. I will sorts and filter the tibble to extract those exact brain areas.
+
+```{r}
+total_tib %>% arrange(desc(average_spikes_per_neuron))
+```
+It looks like the top 4 brain areas with significantly higher average spikes per neuron are RN, MS, SPF, and LH.
+
+```{r}
+
+mouse_by_contrast = tibble()
+for (i in 1:18) {
+  tib_session = tibble(mouse = session[[i]]$mouse_name, diff = abs(session[[i]]$contrast_left - session[[i]]$contrast_right), outcome = session[[i]]$feedback_type) %>% group_by(diff, mouse) %>% summarise(success_rate = mean((outcome+1)/2))
+  mouse_by_contrast = bind_rows(mouse_by_contrast, tib_session)
+}
+
+mouse_by_contrast <- mouse_by_contrast %>% group_by(mouse, diff) %>% summarize(avg_success_rate = mean(success_rate))
+
+mouse_by_contrast_piv <- mouse_by_contrast %>% pivot_wider(names_from = diff, values_from = avg_success_rate)
+mouse_by_contrast_piv
+```
+
+In this pivot table, each value represents success rates grouped by mouse and contrast difference. For example, out of all the trials that Cori participated in where the contrast difference was 0, his success rate was 61.5%. Just at a glace, it seems like the contrast differences result in a higher success rate. 
+
+
+```{r}
+mouse_by_contrast %>% ggplot(aes(diff, avg_success_rate, group=mouse, color=mouse)) + geom_line() + geom_point() + labs(x="Contrast Differences", y="Average Success Rate")
+```
+
+
+It seems like overall, there is a positive trend between the difference in contrasts and each mouse's success rate. 
+
+
+```{r}
+anovatest2 <- aov(avg_success_rate ~ mouse * diff, mouse_by_contrast)
+summary(anovatest2)
+```
+
+- contrast diff p value really low
+
+
+```{r}
+
+spike_by_area2 <- function(s, t) {
+  trial_spks = session[[s]]$spks[[t]]
+  trial_areas = session[[s]]$brain_area
+  sum_spks_per_neuron = apply(trial_spks, 1, sum)
+  avg_spks = tapply(sum_spks_per_neuron, trial_areas, mean)
+  return(avg_spks)
+}
+
+session_summ_by_trial <- function(s) {
+  n.trial=length(session[[s]]$feedback_type)
+  n.area=length(unique(session[[s]]$brain_area ))
+  trial.summary =matrix(nrow=n.trial,ncol= n.area+1+2+2)
+  for(t in 1:n.trial){
+    trial.summary[t,]=c(spike_by_area2(s,t),
+                            session[[s]]$feedback_type[t],
+                          session[[s]]$contrast_left[t],
+                          session[[s]]$contrast_right[t],
+                          t, s)
+  }
+  colnames(trial.summary)=c(names(spike_by_area2(s,t)), 'feedback', 'left contr.','right contr.','trial_id','session_id' )
+  trial.summary <- as_tibble(trial.summary)
+  return (trial.summary)
+}
+
+session_summ_by_trial(1)
+
+
+for (s in 1:18){
+  n.trial=length(session[[s]]$feedback_type)
+  n.area=length(unique(session[[s]]$brain_area ))
+  trial_sum <- session_summ_by_trial(s)
+  area.col=rainbow(n=n.area,alpha=0.7)
+# In base R, I usually initiate a blank plot before drawing anything on it
+  plot(x=1,y=0, col='white',xlim=c(0,n.trial),ylim=c(0.5,2.2), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", s))
+  
+  
+  for(i in 1:n.area){
+    lines(y=trial_sum[[i]],x=trial_sum$trial_id,col=area.col[i],lty=2,lwd=1)
+    lines(smooth.spline(trial_sum$trial_id, trial_sum[[i]]),col=area.col[i],lwd=3)
+    }
+  legend("topright", 
+    legend = colnames(trial_sum)[1:n.area], 
+    col = area.col, 
+    lty = 1, 
+    cex = 0.8
+  )
+  
+}
+
+session_summ_by_trial(3)
+  
+  
+```
+
+- each mice looks like it performed pretty similarly looking at the graph
+- also differences in contrast is a big one using the anova results
+- each session is also different, so there is heterogeniety -- can use averages for neutrons
+
+```{r}
+session_time_data = tibble()
+
+for (s in 1:18) {
+  num_trials = length(session[[s]]$feedback_type)
+  for (t in 1:num_trials){
+    trial_dat = get_trial_data(s, t)
+    session_time_data = bind_rows(session_time_data, trial_dat)
+  }
+}
+
+session_time_data
+
+```
+
+```{r}
+session_time_data_grouped <- session_time_data %>% group_by(mouse, trial_id) %>% summarise(mean_spike = mean(region_mean_spike))
+```
+
+```{r}
+cori <- session_time_data_grouped %>% filter(mouse == "Cori")
+forssmann <- session_time_data_grouped %>% filter(mouse == "Forssmann")
+hench <- session_time_data_grouped %>% filter(mouse == "Hench")
+lederberg <- session_time_data_grouped %>% filter(mouse == "Lederberg")
+
+cori %>% ggplot(aes(trial_id, mean_spike)) + geom_line() + labs(title = "Cori") + geom_smooth()
+forssmann %>% ggplot(aes(trial_id, mean_spike)) + geom_line() + labs(title = "Forssmann") + geom_smooth()
+hench %>% ggplot(aes(trial_id, mean_spike)) + geom_line() + labs(title = "Hench") + geom_smooth()
+lederberg %>% ggplot(aes(trial_id, mean_spike)) + geom_line() + labs(title = "Lederberg") + geom_smooth()
+
+```
+
+- neuron spikes decrease over the course of the trials - could have an impact
+
+
+
+```{r}
+mega_table <- function(i.s){
+  n_obs = length(session[[i.s]]$feedback_type)
+  dat = tibble(session_id = i.s,
+    trial_id = rep('id', n_obs),
+    avg_spikes = rep(0, n_obs),
+    mouse = rep('name', n_obs),
+    contrast_diff = rep('diff', n_obs),
+    feedback = as.factor(session[[i.s]]$feedback_type)
+  )
+for (i in 1:n_obs){
+    dat$trial_id[i]=i
+    dat$mouse[i] = session[[i.s]]$mouse_name
+    dat$contrast_diff[i] = abs(session[[i.s]]$contrast_left[i]- session[[i.s]]$contrast_right[i])
+    spks.trial = session[[i.s]]$spks[[i]]
+    total.spikes = apply(spks.trial, 1, sum)
+    dat$avg_spikes[i] = mean(total.spikes)
+    }
+
+summary(dat)
+return(dat)
+}
+
+
+data_tibble = tibble()
+for (i in 1:18){
+  session_tbl = mega_table(i)
+  data_tibble = bind_rows(data_tibble, session_tbl)
+}
+
+set.seed(200)
+sample <- sample.int(n = nrow(data_tibble), size = floor(.8 * nrow(data_tibble)), replace = F)
+train <- data_tibble[sample, ]
+test  <- data_tibble[-sample, ]
+logfit <- glm(feedback~avg_spikes+contrast_diff, data = train, family="binomial")
+summary(logfit)
+```
+
+The results of this logistic regression model suggest that avg_spikes, contrast_diff0.5, contrast_diff0.75, contrast_diff1 are significant predictors of feedback. This aligns with the findings in the graph from EDA because there was a dip in the success rate in the graphs at a contrast difference of 0.25. There is a positive association between average spikes and feedback because for each one-unit increase in avg_spikes, the log-odds of feedback being 1 increases by 0.43133, indicating a positive association. The p-values of the significant variables are also very low, which are strong enough to indicate correlation that is not due to random chance.
+
+
+
+
+
+```{r}
+predicted_log <- predict(logfit, newdata=test, type='response')
+predicted_class <- ifelse(predicted_log >= 0.5, 1, -1)
+actual_outcomes <- test$feedback
+
+# Calculate accuracy
+accuracy <- sum(predicted_class == actual_outcomes) / length(actual_outcomes)
+
+# Print the accuracy rate
+print(accuracy)
+```
+
+The logistic regression model was able to produce predictions with a pretty high accuracy rate.
+
+
+knn model
+```{r}
+knnmodel <- train(feedback ~ avg_spikes+contrast_diff, 
+               data = train, 
+               method = "knn", 
+               trControl = trainControl(method = "cv"), 
+               tuneLength = 10)
+predknn <- predict(model, newdata = test)
+confknn <- confusionMatrix(predknn, test$feedback)
+accuracyknn <- confknn$overall["Accuracy"]
+
+confknn
+accuracyknn
+```
+
+
+
+
+
+```{r}
+#log
+prlog = prediction(predicted_log, test$feedback)
+prflog <- performance(prlog, measure = "tpr", x.measure = "fpr")
+auclog <- performance(prlog, measure = "auc")
+auclog <- auclog@y.values[[1]]
+
+
+
+#knn
+predknn2 = as.numeric(predknn)
+mode(predknn2)<- 'double'
+predknn2 = list(predknn2)
+prknn = prediction(predknn2, test$feedback)
+prfknn <- performance(prknn, measure = "tpr", x.measure = "fpr")
+aucknn <- performance(prknn, measure = "auc")
+aucknn <- aucknn@y.values[[1]]
+
+# Bias Guess
+pred0 = predicted_log * 0 + 1
+pr = prediction(pred0, test$feedback)
+prf0 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc0 <- performance(pr, measure = "auc")
+auc0 <- auc0@y.values[[1]]
+
+
+plot(prfknn, ,col = 'red', main = 'ROC curve')
+plot(prflog, add = TRUE, col = 'blue')
+plot(prf0, add = TRUE, col = 'green')
+legend("bottomright", legend=c("Logistic Regression", "KNN", "Bias Guess"), col=c("blue", "red", 'green'), lty=1:1, 
+       cex=0.8)
+```
+
+
+```{r}
+print(c("Log AUC: ", auclog))
+print(c("KNN AUC: ", aucknn))
+print(c("Bias AUC: ", auc0))
+```
+
+Using AUC as a metric, the logistic regression model is slightly better than the KNN model.
+
+
+
+```{r}
+session_test=list()
+for(i in 1:2){
+  session_test[[i]]=readRDS(paste('./test/test',i,'.rds',sep=''))
+}
+
+summary(session_test[[1]])
+```
+
+```{r}
+data_tibble_test = tibble()
+for (i in 1:2){
+  session_tbl_test = mega_table(i)
+  data_tibble_test = bind_rows(data_tibble_test, session_tbl_test)
+}
+```
+
+
+
+```{r}
+predicted_log_test <- predict(logfit, newdata=data_tibble_test, type='response')
+predicted_class_test <- ifelse(predicted_log_test >= 0.5, 1, -1)
+actual_outcomes_test <- data_tibble_test$feedback
+
+# Calculate accuracy
+accuracy_test <- sum(predicted_class_test == actual_outcomes_test) / length(actual_outcomes_test)
+
+# Print the accuracy rate
+print(accuracy_test)
+```
+
+
+```{r}
+predknn_test <- predict(knnmodel, newdata=data_tibble_test)
+confknn_test <- confusionMatrix(predknn_test, data_tibble_test$feedback)
+accuracyknn_test <- confknn_test$overall["Accuracy"]
+
+accuracyknn_test
+```
+
+knn accuracy is slightly higher than the logistic regression
